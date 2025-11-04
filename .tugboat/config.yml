@@ -1,0 +1,50 @@
+services:
+  php:
+    image: tugboatqa/php:8.4-apache
+    depends:
+      - mariadb
+    default: true
+    commands:
+      init:
+        # Install necessary debian deps.
+        - apt-get update && apt-get install libmariadb-dev libevent-dev libcurl4-gnutls-dev
+        # Install some necessary PHP extensions.
+        - docker-php-ext-install bcmath
+        - docker-php-ext-install sockets
+        - docker-php-ext-install mysqli
+        # Update some PHP ini settings.
+        - echo "post_max_size=16M" > $PHP_INI_DIR/conf.d/zabbix.ini
+        - echo "max_execution_time=300" >> $PHP_INI_DIR/conf.d/zabbix.ini
+        # Add Zabbix user
+        - addgroup --system --quiet zabbix
+        - adduser --quiet --system --disabled-login --ingroup zabbix --home /var/lib/zabbix --no-create-home zabbix
+        # Add some runit scripts for server and agent.
+        - mkdir -p /etc/service/zabbix_server
+        - echo '#!/bin/sh\nexec /usr/local/sbin/zabbix_server -f' > /etc/service/zabbix_server/run
+        - chmod +x /etc/service/zabbix_server/run
+        - mkdir -p /etc/service/zabbix_agentd
+        - echo '#!/bin/sh\nexec /usr/local/sbin/zabbix_agentd -f' > /etc/service/zabbix_agentd/run
+        - chmod +x /etc/service/zabbix_agentd/run
+        # Point apache docroot to the UI and fix file permissions
+        - ln -snf $TUGBOAT_ROOT/ui $DOCROOT
+        - chgrp -R www-data $TUGBOAT_ROOT/ui
+        - find "$TUGBOAT_ROOT/ui" -type d -exec chmod 2755 {} \;
+      build:
+        - ./bootstrap.sh
+        - ./configure --enable-server --enable-agent --with-mysql --enable-ipv6 --with-libcurl --with-libxml2
+        - make dbschema
+        - mariadb -h mariadb -u zabbix -pzabbix zabbix < database/mysql/schema.sql
+        - mariadb -h mariadb -u zabbix -pzabbix zabbix < database/mysql/images.sql
+        - mariadb -h mariadb -u zabbix -pzabbix --default-character-set=utf8mb4 zabbix < database/mysql/data.sql
+        - make install
+        - cp .tugboat/zabbix.conf.php $TUGBOAT_ROOT/ui/conf/zabbix.conf.php
+        - cp .tugboat/zabbix_server.conf /usr/local/etc/zabbix_server.conf
+  mariadb:
+    image: tugboatqa/mariadb:11.4
+    commands:
+      build:
+        - mariadb -e "drop database if exists zabbix;"
+        - mariadb -e 'create database zabbix character set utf8mb4 collate utf8mb4_bin;'
+        - mariadb -e "create user if not exists 'zabbix'@'%' identified by 'zabbix';"
+        - mariadb -e "grant all privileges on zabbix.* to 'zabbix'@'%';"
+        - mariadb -e "SET GLOBAL log_bin_trust_function_creators = 1;"
